@@ -73,7 +73,6 @@ static void makeLabel(const mjModel* m, mjtObj type, int id, char* label) {
     return;                                                      \
   } else {                                                       \
     thisgeom = scn->geoms + scn->ngeom;                          \
-    memset(thisgeom, 0, sizeof(mjvGeom));                        \
     mjv_initGeom(thisgeom, mjGEOM_NONE, NULL, NULL, NULL, NULL); \
     thisgeom->objtype = objtype;                                 \
     thisgeom->objid = i;                                         \
@@ -85,13 +84,7 @@ static void makeLabel(const mjModel* m, mjtObj type, int id, char* label) {
 // advance counter
 #define FINISH { scn->ngeom++; }
 
-// assign pseudo-random rgba to constraint island using Halton sequence
-static void islandColor(float rgba[4], int islanddofadr) {
-  rgba[0] = 0.1f + 0.8f*mju_Halton(islanddofadr + 1, 2);
-  rgba[1] = 0.1f + 0.8f*mju_Halton(islanddofadr + 1, 3);
-  rgba[2] = 0.1f + 0.8f*mju_Halton(islanddofadr + 1, 5);
-  rgba[3] = 1;
-}
+
 
 // add contact-related geoms in mjvObject
 static void addContactGeom(const mjModel* m, mjData* d, const mjtByte* flags,
@@ -109,7 +102,7 @@ static void addContactGeom(const mjModel* m, mjData* d, const mjtByte* flags,
     return;
   }
 
-  // loop over contacts
+  // loop over contacts included in impulse solver
   for (int i=0; i < d->ncon; i++) {
     // get pointer
     con = d->contact + i;
@@ -128,21 +121,11 @@ static void addContactGeom(const mjModel* m, mjData* d, const mjtByte* flags,
       mju_n2f(thisgeom->pos, con->pos, 3);
       mju_n2f(thisgeom->mat, mat, 9);
 
-      int efc_adr = d->contact[i].efc_address;
-
-      // override standard colors if visualizing islands
-      if (vopt->flags[mjVIS_ISLAND] && d->nisland && efc_adr >= 0) {
-        // set color using island's first dof
-        islandColor(thisgeom->rgba, d->island_dofind[d->island_dofadr[d->efc_island[efc_adr]]]);
-      }
-
-      // otherwise regular colors (different for included and excluded contacts)
-      else {
-        if (efc_adr >= 0) {
-          f2f(thisgeom->rgba, m->vis.rgba.contactpoint, 4);
-        } else {
-          f2f(thisgeom->rgba, m->vis.rgba.contactgap, 4);
-        }
+      // different colors for included and excluded contacts
+      if (d->contact[i].efc_address >= 0) {
+        f2f(thisgeom->rgba, m->vis.rgba.contactpoint, 4);
+      } else {
+        f2f(thisgeom->rgba, m->vis.rgba.contactgap, 4);
       }
 
       // label contacting geom names or ids
@@ -313,9 +296,11 @@ void mjv_makeConnector(mjvGeom* geom, int type, mjtNum width,
   // require connector-compatible type
   if (type != mjGEOM_CAPSULE && type != mjGEOM_CYLINDER &&
       type != mjGEOM_ARROW && type != mjGEOM_ARROW1 && type != mjGEOM_ARROW2
-      && type != mjGEOM_LINE) {
+      && type != mjGEOM_LINE && type != mjGEOM_ELLIPSOID) {
     mjERROR("invalid geom type %d for connector", type);
   }
+  // else
+    // printf("good geom type %d for connector", type);
 
   // assign type
   geom->type = type;
@@ -324,8 +309,25 @@ void mjv_makeConnector(mjvGeom* geom, int type, mjtNum width,
   geom->size[0] = geom->size[1] = (float)width;
   geom->size[2] = (float)mju_norm3(dif);
 
+  if (width>geom->size[2]/2)
+    {
+      // printf("\nl: %f, w:%f", geom->size[2], width);
+      width = geom->size[2]/2;
+    }
+
+  if (type == mjGEOM_ELLIPSOID)
+  {
+    geom->size[2] = 0.9*(float)mju_norm3(dif);
+    if (mju_norm3(dif)<1*width)
+      geom->size[0] = geom->size[1] = 0.007*(float)width; // almost like not rendering
+    else
+      geom->size[0] = geom->size[1] = 0.9*(float)width;
+
+  }
+
+
   // cylinder and capsule are centered, and size[0] is "radius"
-  if (type == mjGEOM_CAPSULE || type == mjGEOM_CYLINDER) {
+  if (type == mjGEOM_CAPSULE || type == mjGEOM_CYLINDER || type == mjGEOM_ELLIPSOID) {
     geom->pos[0] = 0.5*(a0 + b0);
     geom->pos[1] = 0.5*(a1 + b1);
     geom->pos[2] = 0.5*(a2 + b2);
@@ -360,7 +362,7 @@ void mjv_initGeom(mjvGeom* geom, int type, const mjtNum* size,
 
   // set size (for XYZ scaling)
   if (size) {
-    switch ((mjtGeom) type) {
+    switch (type) {
     case mjGEOM_SPHERE:
       geom->size[0] = (float)size[0];
       geom->size[1] = (float)size[0];
@@ -523,17 +525,6 @@ static void drawBoundingBox(mjvGeom* thisgeom, mjData* d, mjvScene* scn,
 
 
 
-// computes the camera frustum
-static void getFrustum(float zver[2], float zhor[2], float znear,
-                       const float K[4], const float sensorsize[2]) {
-  zhor[0] = znear / K[0] * (sensorsize[0]/2.f - K[2]);
-  zhor[1] = znear / K[0] * (sensorsize[0]/2.f + K[2]);
-  zver[0] = znear / K[1] * (sensorsize[1]/2.f - K[3]);
-  zver[1] = znear / K[1] * (sensorsize[1]/2.f + K[3]);
-}
-
-
-
 // add abstract geoms
 void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
                   const mjvPerturb* pert, int catmask, mjvScene* scn) {
@@ -659,10 +650,6 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
         const mjtNum* xpos = d->geom_xpos + 3 * geomid;
         const mjtNum* xmat = d->geom_xmat + 9 * geomid;
 
-        if (!d->bvh_active[i]) {
-          continue;
-        }
-
         rgba[0] = d->bvh_active[i] ? 1 : 0;
         rgba[1] = d->bvh_active[i] ? 0 : 1;
 
@@ -774,21 +761,10 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
                (pert->active & mjPERT_ROTATE) > 0,
                (pert->active2 & mjPERT_ROTATE) > 0);
 
-      // construct geom: if body i has a collision aabb, use that
-      mjtNum pos[3] = {0};
-      if (m->body_bvhnum[i]) {
-        mjtNum* aabb = m->bvh_aabb+6*m->body_bvhadr[i];
-        mju_copy3(sz, aabb+3);
-        mju_rotVecMat(pos, aabb, d->ximat+9*i);
-      }
-
-      // otherwise box of size meansize
-      else {
-        sz[0] = sz[1] = sz[2] = scl;
-      }
+      // construct geom
+      sz[0] = sz[1] = sz[2] = scl;
       mju_quat2Mat(mat, pert->refquat);
-      mju_addTo3(pos, d->xipos+3*i);
-      mjv_initGeom(thisgeom, mjGEOM_BOX, sz, pos, mat, rgba);
+      mjv_initGeom(thisgeom, mjGEOM_BOX, sz, d->xipos+3*i, mat, rgba);
 
       FINISH
     }
@@ -912,7 +888,7 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
         int j = m->jnt_bodyid[i];
         mjtNum* from;
         mjtNum to[3];
-        switch ((mjtJoint) m->jnt_type[i]) {
+        switch (m->jnt_type[i]) {
         case mjJNT_FREE:
           thisgeom->type = mjGEOM_BOX;
           thisgeom->size[0] = thisgeom->size[1] = thisgeom->size[2] = 0.3*sz[1];
@@ -1080,8 +1056,7 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
           for (int k=geomadr; k < geomadr+geomnum; k++) {
             int geomtype = m->geom_type[k];
             // add inflated geom if it is a regular primitive
-            if (geomtype != mjGEOM_PLANE && geomtype != mjGEOM_HFIELD &&
-                geomtype != mjGEOM_MESH  && geomtype != mjGEOM_SDF) {
+            if (geomtype != mjGEOM_PLANE && geomtype != mjGEOM_HFIELD && geomtype != mjGEOM_MESH) {
               START
               // inflate sizes by 5%
               mju_scl3(sz, m->geom_size+3*k, 1.05);
@@ -1118,7 +1093,26 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
               sz[0] *= m->vis.map.actuatortendon;
 
               // construct geom
-              mjv_connector(thisgeom, mjGEOM_CAPSULE, sz[0], d->wrap_xpos+3*k, d->wrap_xpos+3*k+3);
+              mjtNum szz = m->actuator_gainprm[i*mjNGAIN +2]/50000.0;
+              // printf("%d, %f", i, szz);
+
+              // mjv_connector(thisgeom, mjGEOM_CYLINDER, sz[0], d->wrap_xpos+3*k, d->wrap_xpos+3*k+3);
+              mjv_connector(thisgeom, mjGEOM_ELLIPSOID, szz, d->wrap_xpos+3*k, d->wrap_xpos+3*k+3);
+
+              // mjtNum szz[3];
+              // szz[0] = 2.0*sz[0];
+              // szz[1] = 2.0*sz[0];
+              // szz[2] = 1.0*sz[1];
+
+              // mjtNum pos[3];
+              // pos[0] = (d->wrap_xpos[3*k+0] + d->wrap_xpos[3*k+3+0])/2.0;
+              // pos[1] = (d->wrap_xpos[3*k+1] + d->wrap_xpos[3*k+3+1])/2.0;
+              // pos[2] = (d->wrap_xpos[3*k+2] + d->wrap_xpos[3*k+3+2])/2.0;
+
+              // mjv_initGeom(thisgeom, mjGEOM_ELLIPSOID, szz, pos, d->geom_xmat + 9*k, thisgeom->rgba);
+
+              // void mjv_initGeom(mjvGeom* geom, int type, const mjtNum* size,
+                  // const mjtNum* pos, const mjtNum* mat, const float* rgba)
 
               // set material if given
               setMaterial(m, thisgeom, m->tendon_matid[j], m->tendon_rgba+4*j, vopt->flags);
@@ -1134,28 +1128,6 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
               FINISH
             }
           }
-        }
-      }
-    }
-  }
-
-  // island labels
-  objtype = mjOBJ_UNKNOWN;
-  category = mjCAT_DECOR;
-  if ((category & catmask) && (vopt->label == mjLABEL_ISLAND) && d->nisland) {
-    for (int i=1; i < m->nbody; i++) {
-      int weld_id = m->body_weldid[i];
-      if (m->body_dofnum[weld_id]) {
-        int islandid = d->dof_island[m->body_dofadr[weld_id]];
-        if (islandid > -1) {
-          START
-
-          thisgeom->type = mjGEOM_LABEL;
-          mju_n2f(thisgeom->pos, d->xipos+3*i, 3);
-          mju_n2f(thisgeom->mat, d->ximat+9*i, 9);
-          mjSNPRINTF(thisgeom->label, "%d", islandid);
-
-          FINISH
         }
       }
     }
@@ -1192,26 +1164,11 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
       // copy rbound from model
       thisgeom->modelrbound = (float)m->geom_rbound[i];
 
-      // set material properties, override if visualizing islands
-      float* rgba = m->geom_rgba+4*i;
-      float rgba_island[4] = {.5, .5, .5, 1};
-      int geom_matid = m->geom_matid[i];
-      if (vopt->flags[mjVIS_ISLAND] && d->nisland) {
-        geom_matid = -1;
-        rgba = rgba_island;
-        int weld_id = m->body_weldid[m->geom_bodyid[i]];
-        if (m->body_dofnum[weld_id]) {
-          int island = d->dof_island[m->body_dofadr[weld_id]];
-          if (island > -1) {
-            // color using island's first dof
-            islandColor(rgba_island, d->island_dofind[d->island_dofadr[island]]);
-          }
-        }
-      }
-      setMaterial(m, thisgeom, geom_matid, rgba, vopt->flags);
+      // set material properties
+      setMaterial(m, thisgeom, m->geom_matid[i], m->geom_rgba+4*i, vopt->flags);
 
       // set texcoord
-      if ((m->geom_type[i] == mjGEOM_MESH || m->geom_type[i] == mjGEOM_SDF) &&
+      if (m->geom_type[i] == mjGEOM_MESH &&
           m->geom_dataid[i] >= 0 &&
           m->mesh_texcoordadr[m->geom_dataid[i]] >= 0) {
         thisgeom->texcoord = 1;
@@ -1233,10 +1190,9 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
       }
 
       // mesh: 2*i is original, 2*i+1 is convex hull
-      if (m->geom_type[i] == mjGEOM_MESH || m->geom_type[i] == mjGEOM_SDF) {
+      if (m->geom_type[i] == mjGEOM_MESH) {
         thisgeom->dataid *= 2;
-        if (m->mesh_graphadr[m->geom_dataid[i]] >= 0 && vopt->flags[mjVIS_CONVEXHULL] &&
-           (m->geom_contype[i] || m->geom_conaffinity[i])) {
+        if (m->mesh_graphadr[m->geom_dataid[i]] >= 0 && vopt->flags[mjVIS_CONVEXHULL]) {
           thisgeom->dataid += 1;
         }
       }
@@ -1483,87 +1439,6 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
     }
   }
 
-  // camera frustum
-  if (vopt->flags[mjVIS_CAMERA]) {
-    float rgba[] = {1, 1, 0, .2};
-    mjtNum vnear[4][3], vfar[4][3];
-    mjtNum center[3];
-    mjtNum znear = m->vis.map.znear * m->stat.extent;
-    mjtNum zfar = m->vis.map.zfar * m->stat.extent;
-    float zver[2], zhor[2];
-    for (int i=0; i < m->ncam; i++) {
-      if (m->cam_sensorsize[2*i+1] == 0) {
-        continue;
-      }
-      getFrustum(zver, zhor, znear, m->cam_intrinsic + 4*i, m->cam_sensorsize + 2*i);
-
-      // frustum frame to convert from planes to vertex representation
-      mjtNum *cam_xpos = d->cam_xpos+3*i;
-      mjtNum *cam_xmat = d->cam_xmat+9*i;
-      mjtNum x[] = {cam_xmat[0], cam_xmat[3], cam_xmat[6]};
-      mjtNum y[] = {cam_xmat[1], cam_xmat[4], cam_xmat[7]};
-      mjtNum z[] = {cam_xmat[2], cam_xmat[5], cam_xmat[8]};
-
-      // vertices of the near plane
-      mju_addScl3(center, cam_xpos, z, -znear);
-      mju_addScl3(vnear[0], center, x, -zhor[0]);
-      mju_addScl3(vnear[1], center, x,  zhor[1]);
-      mju_addScl3(vnear[2], center, x,  zhor[1]);
-      mju_addScl3(vnear[3], center, x, -zhor[0]);
-      mju_addToScl3(vnear[0], y, -zver[0]);
-      mju_addToScl3(vnear[1], y, -zver[0]);
-      mju_addToScl3(vnear[2], y,  zver[1]);
-      mju_addToScl3(vnear[3], y,  zver[1]);
-
-      // vertices of the far plane
-      zhor[0] *= zfar / znear;
-      zhor[1] *= zfar / znear;
-      zver[0] *= zfar / znear;
-      zver[1] *= zfar / znear;
-      mju_addScl3(center, cam_xpos, z, -zfar);
-      mju_addScl3(vfar[0], center, x, -zhor[0]);
-      mju_addScl3(vfar[1], center, x,  zhor[1]);
-      mju_addScl3(vfar[2], center, x,  zhor[1]);
-      mju_addScl3(vfar[3], center, x, -zhor[0]);
-      mju_addToScl3(vfar[0], y, -zver[0]);
-      mju_addToScl3(vfar[1], y, -zver[0]);
-      mju_addToScl3(vfar[2], y,  zver[1]);
-      mju_addToScl3(vfar[3], y,  zver[1]);
-
-      // triangulation and wireframe of the frustum
-      for (int e=0; e<4; e++) {
-        START
-        mju_sub3(x, vfar[e], vnear[e]);
-        mju_sub3(y, vnear[(e+1)%4], vnear[e]);
-        mju_cross(z, x, y);
-        mjtNum tri1[3] = {mju_normalize3(x), mju_normalize3(y), mju_normalize3(z)};
-        mjtNum xmat1[9] = {x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]};
-        mjv_initGeom(thisgeom, mjGEOM_TRIANGLE, tri1, vnear[e], xmat1, rgba);
-        FINISH
-        START
-        mju_sub3(y, vnear[(e+1)%4], vfar[e]);
-        mju_sub3(x, vfar[(e+1)%4], vfar[e]);
-        mju_cross(z, x, y);
-        mjtNum tri2[3] = {mju_normalize3(x), mju_normalize3(y), mju_normalize3(z)};
-        mjtNum xmat2[9] = {x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]};
-        mjv_initGeom(thisgeom, mjGEOM_TRIANGLE, tri2, vfar[e], xmat2, rgba);
-        FINISH
-        START
-        mjv_connector(thisgeom, mjGEOM_LINE, 3, vnear[e], vnear[(e+1)%4]);
-        f2f(thisgeom->rgba, rgba, 4);
-        FINISH
-        START
-        mjv_connector(thisgeom, mjGEOM_LINE, 3, vfar[e], vfar[(e+1)%4]);
-        f2f(thisgeom->rgba, rgba, 4);
-        FINISH
-        START
-        mjv_connector(thisgeom, mjGEOM_LINE, 3, vnear[e], vfar[e]);
-        f2f(thisgeom->rgba, rgba, 4);
-        FINISH
-      }
-    }
-  }
-
   // lights
   objtype = mjOBJ_LIGHT;
   category = mjCAT_DECOR;
@@ -1636,21 +1511,17 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
   if (vopt->flags[mjVIS_TENDON] && (category & catmask)) {
     for (int i=0; i < m->ntendon; i++) {
       if (vopt->tendongroup[mjMAX(0, mjMIN(mjNGROUP-1, m->tendon_group[i]))]) {
-        // tendon has a deadband spring
+        // stiff tendon has a deadband spring
         int limitedspring =
           m->tendon_stiffness[i] > 0            &&    // positive stiffness
           m->tendon_lengthspring[2*i] == 0      &&    // range lower-bound is 0
           m->tendon_lengthspring[2*i+1] > 0;          // range upper-bound is positive
 
-        // tendon has a simple length constraint, but is currently not limited
-        mjtNum ten_length = d->ten_length[i];
-        mjtNum lower = m->tendon_range[2*i];
-        mjtNum upper = m->tendon_range[2*i + 1];
+        // non-stiff tendon has a length constraint
         int limitedconstraint =
           m->tendon_stiffness[i] == 0           &&    // zero stiffness
           m->tendon_limited[i] == 1             &&    // limited length range
-          lower == 0                            &&    // range lower-bound is 0
-          ten_length < upper;                         // current length is smaller than upper bound
+          m->tendon_range[2*i] == 0;                  // range lower-bound is 0
 
         // conditions for drawing a catenary
         int draw_catenary =
@@ -1675,22 +1546,16 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
               }
 
               // construct geom
-              mjv_connector(thisgeom, mjGEOM_CAPSULE, sz[0], d->wrap_xpos+3*j, d->wrap_xpos+3*j+3);
+              mjtNum szz;
+              for(int ia=0; ia<m->na; ia++)
+                if (m->actuator_trnid[2*ia] == i)
+                  szz = m->actuator_gainprm[ia*mjNGAIN +2]/200000.0;
 
-              // set material properties, override if visualizing islands
-              float* rgba = m->tendon_rgba+4*i;
-              float rgba_island[4] = {.5, .5, .5, 1};
-              int tendon_matid = m->tendon_matid[i];
-              if (vopt->flags[mjVIS_ISLAND] && d->nisland) {
-                tendon_matid = -1;
-                rgba = rgba_island;
-                if (d->tendon_efcadr[i] != -1) {
-                  // set color using island's first dof
-                  int island = d->efc_island[d->tendon_efcadr[i]];
-                  islandColor(rgba_island, d->island_dofind[d->island_dofadr[island]]);
-                }
-              }
-              setMaterial(m, thisgeom, tendon_matid, rgba, vopt->flags);
+              mjv_connector(thisgeom, mjGEOM_CAPSULE, szz, d->wrap_xpos+3*j, d->wrap_xpos+3*j+3);
+              // mjv_connector(thisgeom, mjGEOM_CAPSULE, sz[0], d->wrap_xpos+3*j, d->wrap_xpos+3*j+3);
+
+              // set material if given
+              setMaterial(m, thisgeom, m->tendon_matid[i], m->tendon_rgba+4*i, vopt->flags);
 
               // vopt->label: only the first segment
               if (vopt->label == mjLABEL_TENDON && j == d->ten_wrapadr[i]) {
@@ -1724,7 +1589,7 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
           for (int j=0; j < npoints-1; j++) {
             START
 
-            sz[0] = m->tendon_width[i];
+              sz[0] = m->tendon_width[i];
 
             // construct geom
             mjv_connector(thisgeom, mjGEOM_CAPSULE, sz[0], catenary+3*j, catenary+3*j+3);
@@ -1908,7 +1773,7 @@ void mjv_addGeoms(const mjModel* m, mjData* d, const mjvOption* vopt,
   if (vopt->flags[mjVIS_CONSTRAINT] && (category & catmask) && m->neq) {
     // connect or weld
     for (int i=0; i < m->neq; i++) {
-      if (d->eq_active[i] && (m->eq_type[i] == mjEQ_CONNECT || m->eq_type[i] == mjEQ_WELD)) {
+      if (m->eq_active[i] && (m->eq_type[i] == mjEQ_CONNECT || m->eq_type[i] == mjEQ_WELD)) {
         // compute endpoints in global coordinates
         int j = m->eq_obj1id[i], k = m->eq_obj2id[i];
         mju_rotVecMat(vec, m->eq_data+mjNEQDATA*i+3*(m->eq_type[i] == mjEQ_WELD), d->xmat+9*j);
@@ -2010,27 +1875,24 @@ void mjv_makeLights(const mjModel* m, mjData* d, mjvScene* scn) {
 // update camera only
 void mjv_updateCamera(const mjModel* m, mjData* d, mjvCamera* cam, mjvScene* scn) {
   mjtNum ca, sa, ce, se, move[3], *mat;
-  mjtNum headpos[3], forward[3], up[3], right[3], ipd;
+  mjtNum headpos[3], forward[3], up[3], right[3], ipd, fovy, znear, zfar;
 
   // return if nothing to do
   if (!m || !cam || cam->type == mjCAMERA_USER) {
     return;
   }
 
-  // initialize frustum
-  float zver[2], zhor[2] = {0, 0};
-  float znear = m->vis.map.znear * m->stat.extent;
-  float zfar = m->vis.map.zfar * m->stat.extent;
+  // get znear, zfar
+  znear = m->vis.map.znear * m->stat.extent;
+  zfar = m->vis.map.zfar * m->stat.extent;
 
   // get headpos, forward[3], up, right, ipd, fovy
   switch (cam->type) {
   case mjCAMERA_FREE:
   case mjCAMERA_TRACKING:
-    // get global ipd
+    // get global ipd and fovy
     ipd = m->vis.global.ipd;
-
-    // compute image size from global fovy
-    zver[0] = zver[1] = (float)znear * mju_tan(m->vis.global.fovy * (float)(mjPI/360.0));
+    fovy = m->vis.global.fovy;
 
     // move lookat for tracking
     if (cam->type == mjCAMERA_TRACKING) {
@@ -2071,13 +1933,7 @@ void mjv_updateCamera(const mjModel* m, mjData* d, mjvCamera* cam, mjvScene* scn
 
     // get camera-specific ipd and fovy
     ipd = m->cam_ipd[cid];
-
-    // get frustum from intrinsics or from fovy
-    if (m->cam_sensorsize[2*cid+1]) {
-      getFrustum(zver, zhor, znear, m->cam_intrinsic + 4*cid, m->cam_sensorsize + 2*cid);
-    } else {
-      zver[0] = zver[1] = (float)znear * mju_tan(m->cam_fovy[cid] * (float)(mjPI/360.0));
-    }
+    fovy = m->cam_fovy[cid];
 
     // get pointer to camera orientation matrix
     mat = d->cam_xmat + 9*cid;
@@ -2109,13 +1965,12 @@ void mjv_updateCamera(const mjModel* m, mjData* d, mjvCamera* cam, mjvScene* scn
       scn->camera[view].up[i] = (float)up[i];
     }
 
-    // set symmetric frustum using intrinsic camera matrix
-    scn->camera[view].frustum_top = zver[1];
-    scn->camera[view].frustum_bottom = -zver[0];
-    scn->camera[view].frustum_center = (zhor[1] - zhor[0]) / 2;
-    scn->camera[view].frustum_width = (zhor[1] + zhor[0]) / 2;
-    scn->camera[view].frustum_near = znear;
-    scn->camera[view].frustum_far = zfar;
+    // set symmetric frustum
+    scn->camera[view].frustum_center = 0;
+    scn->camera[view].frustum_top = (float)znear * tanf(fovy * (float)(mjPI/360.0));
+    scn->camera[view].frustum_bottom = -scn->camera[view].frustum_top;
+    scn->camera[view].frustum_near = (float)znear;
+    scn->camera[view].frustum_far = (float)zfar;
   }
 
   // disable model transformation (do not clear float data; user may need it later)
